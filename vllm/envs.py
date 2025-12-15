@@ -239,7 +239,14 @@ def get_vllm_port() -> Optional[int]:
 # --8<-- [start:env-vars-definition]
 
 environment_variables: dict[str, Callable[[], Any]] = {
-
+    #Env Var for MoE log
+    # switch for moe log. A path to
+    "VLLM_LOG_MOE": lambda: os.getenv("VLLM_LOG_MOE") if os.getenv("VLLM_LOG_MOE","").strip() !="" else None,
+    # index of moe layer to be logged. -1 represents "no valid index"
+    "LOG_MOE_LAYER_IDX": lambda: int(os.getenv("LOG_MOE_LAYER_IDX")) if os.getenv("LOG_MOE_LAYER_IDX", "").strip() != "" else None,
+    # same seed can reproduce experiment
+    "LOG_MOE_SEED": lambda: int(os.getenv("LOG_MOE_SEED")) if os.getenv("LOG_MOE_SEED", "").strip() != "" else None,
+    
     # ================== Installation Time Env Vars ==================
 
     # Target device of vLLM, supporting [cuda (by default),

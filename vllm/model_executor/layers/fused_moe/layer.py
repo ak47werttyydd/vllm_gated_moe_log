@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.routing_simulator import (
     RoutingSimulator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -63,6 +64,9 @@ if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
 else:
     fused_moe_pallas = None  # type: ignore
+
+# moe log
+from .moe_log import MOE_TOPK_LOGGER
 
 logger = init_logger(__name__)
 
@@ -482,6 +486,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count)
+        
+        #log moe
+        layer_idx = getattr(self, "layer_idx", None)
+        if MOE_TOPK_LOGGER.enabled_for(layer_idx):
+            MOE_TOPK_LOGGER.log_topk(layer_idx, topk_ids, topk_weights,top_k)
+
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts(
@@ -911,6 +921,12 @@ class FusedMoE(CustomOp):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
+        
+        #add layer_idx to self.quant_method
+        #layer_idx for moe log
+        layer_idx = extract_layer_index(prefix)
+        self.quant_method.layer_idx = layer_idx
+        print(f"FusedMoE.quant_method.layer_idx is {self.quant_method.layer_idx}")
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (

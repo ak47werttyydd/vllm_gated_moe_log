@@ -62,6 +62,8 @@ from vllm.worker.model_runner_base import (
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
+from vllm.model_executor.layers.fused_moe.moe_log_context import set_current_req_ids, clear_current_req_ids
+
 logger = init_logger(__name__)
 
 LORA_WARMUP_RANK = 8
@@ -83,6 +85,9 @@ class ModelInputForGPU(ModelRunnerInputBase):
     runners that run additional steps should subclass this method to add
     additional fields.
     """
+
+    #record req_id for each input token for moe log
+    token_req_ids: Optional[List[str]] = None
     input_tokens: Optional[torch.Tensor] = None
     inputs_embeds: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
@@ -782,9 +787,15 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Combine and flatten intermediate data.
         input_tokens = list[int]()
         inputs_embeds_list = list[torch.Tensor]()
+        # list to record req_id for each input token for moe log
+        token_req_ids: list[str] = []
         for inter_data in self.inter_data_list:
+            rid = inter_data.request_id
             for cur_input_tokens in inter_data.input_tokens:
                 input_tokens.extend(cur_input_tokens)
+                # Record req_id of current token
+                token_req_ids.extend([rid] * len(cur_input_tokens))
+
             if inter_data.inputs_embeds is not None:
                 inputs_embeds_list.append(
                     inter_data.inputs_embeds.to(
@@ -862,6 +873,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Tokens and positions.
         if cuda_graph_pad_size:
             input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
+            token_req_ids.extend(itertools.repeat("__pad__", cuda_graph_pad_size))
         assert self.runner.device is not None
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,
@@ -920,6 +932,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         return self.model_input_cls(
+            token_req_ids=token_req_ids,
             input_tokens=input_tokens_tensor,
             inputs_embeds=inputs_embeds,
             input_positions=input_positions_tensor,
@@ -1598,6 +1611,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         num_steps: int = 1,
         **kwargs,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
+        
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
 
@@ -1668,21 +1682,27 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
-        if not bypass_model_exec:
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config, virtual_engine):
-                hidden_or_intermediate_states = model_executable(
-                    input_ids=model_input.input_tokens,
-                    inputs_embeds=model_input.inputs_embeds,
-                    positions=model_input.input_positions,
-                    intermediate_tensors=intermediate_tensors,
-                    **MultiModalKwargs.as_kwargs(
-                        multi_modal_kwargs,
-                        device=self.device,
-                    ),
-                    **seqlen_agnostic_kwargs,
-                    **model_kwargs,
-                )
+        #pass req_ids to moe_log.py
+        set_current_req_ids(model_input.token_req_ids or [])
+        try:
+            if not bypass_model_exec:
+                with set_forward_context(model_input.attn_metadata,
+                                        self.vllm_config, virtual_engine):
+                    hidden_or_intermediate_states = model_executable(
+                        input_ids=model_input.input_tokens,
+                        inputs_embeds=model_input.inputs_embeds,
+                        positions=model_input.input_positions,
+                        intermediate_tensors=intermediate_tensors,
+                        **MultiModalKwargs.as_kwargs(
+                            multi_modal_kwargs,
+                            device=self.device,
+                        ),
+                        **seqlen_agnostic_kwargs,
+                        **model_kwargs,
+                    )
+        finally:
+            #clear req_ids after model forward even if exception occurs
+            clear_current_req_ids()
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
