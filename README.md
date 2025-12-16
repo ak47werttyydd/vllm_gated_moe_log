@@ -13,7 +13,7 @@
     - `$LOG_MOE_SEED` is for reproductivity of the experiment scripted by `tests/test_moe_log/run_generate.py`
 
 # Results
-Sorry that I don't have appropriate server to run vllm because I only have the server with Ascend. Unfortunately, the server for running vllm on V100 in my previous project (requests scheduling system for LLM inference ) is not available now.
+Sorry that I don't have appropriate server to run vllm。
 
 I don't know Top-3 experts. But We compute the empirical routing distribution over experts as
 
